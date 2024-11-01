@@ -34,6 +34,12 @@ class ViewController: UIViewController {
     private var detectionRequests: [VNDetectFaceRectanglesRequest]?
     private var trackingRequests: [VNTrackObjectRequest]?
     
+    var isMouthOpenForSurprise = false
+    var isBlinking = false
+    var isShakingHead = false
+    var lastDetectedTime: Date?
+
+    
     lazy var sequenceRequestHandler = VNSequenceRequestHandler()
     
     // MARK: UIViewController overrides
@@ -64,7 +70,6 @@ class ViewController: UIViewController {
     override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
         return .portrait
     }
-    
     
     
     // MARK: Performing Vision Requests
@@ -99,8 +104,8 @@ class ViewController: UIViewController {
         // see if we can get any face features, this will fail if no faces detected
         // try to save the face observations to a results vector
         guard let faceDetectionRequest = request as? VNDetectFaceRectanglesRequest,
-            let results = faceDetectionRequest.results as? [VNFaceObservation] else {
-                return
+              let results = faceDetectionRequest.results as? [VNFaceObservation] else {
+            return
         }
         
         if !results.isEmpty{
@@ -136,7 +141,7 @@ class ViewController: UIViewController {
     // Handle delegate method callback on receiving a sample buffer.
     // This is where we get the pixel buffer from the camera and need to
     // generate the vision requests
-    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) 
+    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection)
     {
         
         var requestHandlerOptions: [VNImageOption: AnyObject] = [:]
@@ -161,7 +166,7 @@ class ViewController: UIViewController {
             print("Tracking request array not setup, aborting.")
             return
         }
-
+        
         
         // check to see if the tracking request is empty (no face currently detected)
         // if it is empty,
@@ -195,14 +200,14 @@ class ViewController: UIViewController {
                 print("Face object lost, resetting detection...")
                 return
             }
-
+            
             self.performLandmarkDetection(newTrackingRequests: newTrackingRequests,
                                           pixelBuffer: pixelBuffer,
                                           exifOrientation: exifOrientation,
                                           requestHandlerOptions: requestHandlerOptions)
-  
+            
         }
-    
+        
         
     }
     
@@ -261,7 +266,7 @@ class ViewController: UIViewController {
                         trackingRequest.inputObservation = observation
                     }
                     else {
-
+                        
                         // once below thresh, make it last frame
                         // this will stop the processing of tracker
                         trackingRequest.isLastFrame = true
@@ -320,29 +325,145 @@ class ViewController: UIViewController {
     }
     
     
-    // Interpret the output of our facial landmark detector
-    // this code is called upon succesful completion of landmark detection
-    func landmarksCompletionHandler(request:VNRequest, error:Error?){
-        
-        if error != nil {
-            print("FaceLandmarks error: \(String(describing: error)).")
+    // MARK: - Landmark Detection Completion Handler
+        func landmarksCompletionHandler(request: VNRequest, error: Error?) {
+            if let error = error {
+                print("FaceLandmarks error: \(String(describing: error)).")
+                return
+            }
+            
+            guard let landmarksRequest = request as? VNDetectFaceLandmarksRequest,
+                  let results = landmarksRequest.results as? [VNFaceObservation] else { return }
+            
+            DispatchQueue.main.async {
+                self.drawFaceObservations(results)
+                for faceObservation in results {
+                    if let landmarks = faceObservation.landmarks {
+                        self.processLandmarks(landmarks)
+                    }
+                }
+            }
         }
         
-        // any landmarks found that we can display? If not, return
-        guard let landmarksRequest = request as? VNDetectFaceLandmarksRequest,
-              let results = landmarksRequest.results as? [VNFaceObservation] else {
-            return
+        // MARK: - Process Detected Landmarks
+        func processLandmarks(_ landmarks: VNFaceLandmarks2D) {
+            guard let leftEye = landmarks.leftEye,
+                  let rightEye = landmarks.rightEye,
+                  let outerLips = landmarks.outerLips else { return }
+            
+            if let lastTime = lastDetectedTime, Date().timeIntervalSince(lastTime) < 0.3 {
+                return
+            }
+            lastDetectedTime = Date()
+            
+            // Apply refined expression detection and update UI accordingly
+            updateUIIfChanged(condition: isMouthOpenForSurprise(outerLips), currentState: &isMouthOpenForSurprise, action: displayOpenMouthUI)
+            updateUIIfChanged(condition: isBlinking(leftEye, rightEye), currentState: &isBlinking, action: displayBlinkUI)
+            updateUIIfChanged(condition: isShakingHead(leftEye, rightEye), currentState: &isShakingHead, action: displayShakeHeadUI)
         }
         
-        // Perform all UI updates (drawing) on the main queue, not the background queue on which this handler is being called.
-        DispatchQueue.main.async {
-            // draw the landmarks using core animation layers
-            self.drawFaceObservations(results)
+    // MARK: - Refined Expression Detection Conditions
+
+    func isMouthOpenForSurprise(_ outerLips: VNFaceLandmarkRegion2D) -> Bool {
+        let points = outerLips.normalizedPoints
+        guard points.count > 9 else { return false } // Ensure there are enough points
+
+        // Define left, right, and center points for upper and lower lips
+        let leftCorner = points[0]
+        let rightCorner = points[6]
+        let upperMiddle = points[3]
+        let lowerMiddle = points[9]
+        
+        // Calculate the mouth width and height
+        let mouthWidth = abs(rightCorner.x - leftCorner.x)
+        let mouthHeight = abs(upperMiddle.y - lowerMiddle.y)
+
+        // Heuristic for surprise: A significantly larger vertical distance relative to width
+        return mouthHeight / mouthWidth > 0.5 && mouthHeight > 0.3
+    }
+
+
+
+
+    func isBlinking(_ leftEye: VNFaceLandmarkRegion2D, _ rightEye: VNFaceLandmarkRegion2D) -> Bool {
+        let leftEyePoints = leftEye.normalizedPoints
+        let rightEyePoints = rightEye.normalizedPoints
+        guard leftEyePoints.count > 4, rightEyePoints.count > 4 else { return false }
+
+        let leftEyeHeight = abs(leftEyePoints[4].y - leftEyePoints[1].y)
+        let rightEyeHeight = abs(rightEyePoints[4].y - rightEyePoints[1].y)
+
+        return leftEyeHeight < 0.02 && rightEyeHeight < 0.02 // Slightly lowered for sensitivity
+    }
+
+    func isShakingHead(_ leftEye: VNFaceLandmarkRegion2D, _ rightEye: VNFaceLandmarkRegion2D) -> Bool {
+        let leftEyePoints = leftEye.normalizedPoints
+        let rightEyePoints = rightEye.normalizedPoints
+        guard leftEyePoints.count > 0, rightEyePoints.count > 0 else { return false }
+
+        let horizontalEyeDistance = abs(leftEyePoints[0].x - rightEyePoints[0].x)
+
+        // Lowered the threshold slightly to better capture head shake
+        return horizontalEyeDistance > 0.35
+    }
+
+        
+        // MARK: - UI Update Methods
+        private func updateUIIfChanged(condition: Bool, currentState: inout Bool, action: () -> Void) {
+            if condition != currentState {
+                currentState = condition
+                if condition { action() }
+            }
+        }
+        
+        // MARK: - UI Feedback Display Methods
+        func displayOpenMouthUI() {
+        updateOverlayColor(to: .red)
+        showUIFeedback(labelText: "😮 Detected!", color: .red, positionY: 100)
+    }
+
+        func displayBlinkUI() {
+        updateOverlayColor(to: .blue)
+        showUIFeedback(labelText: "😉 Blink Detected!", color: .blue, positionY: 200)
+    }
+
+        func displayShakeHeadUI() {
+        updateOverlayColor(to: .purple)
+        showUIFeedback(labelText: "🙅‍♂️ Head Shake Detected!", color: .purple, positionY: 300)
+        }
+
+    private func updateOverlayColor(to color: UIColor) {
+        detectionOverlayLayer?.sublayers?.forEach { layer in
+            if let shapeLayer = layer as? CAShapeLayer {
+                shapeLayer.strokeColor = color.cgColor
+            }
+        }
+    }
+
+        
+        private func showUIFeedback(labelText: String, color: UIColor, positionY: CGFloat) {
+            let label = UILabel()
+            label.text = labelText
+            label.font = UIFont.systemFont(ofSize: 24)
+            label.textColor = color
+            label.alpha = 0
+            label.frame = CGRect(x: 50, y: positionY, width: 250, height: 50)
+            self.view.addSubview(label)
+            
+            // Animate the label appearance and fade out
+            UIView.animate(withDuration: 0.5, animations: {
+                label.alpha = 1
+            }) { _ in
+                UIView.animate(withDuration: 1.0, delay: 1.0, options: [], animations: {
+                    label.alpha = 0
+                }) { _ in
+                    label.removeFromSuperview()
+                }
+            }
         }
     }
     
-    
-}
+
 
 
 // MARK: Helper Methods
