@@ -34,11 +34,19 @@ class ViewController: UIViewController {
     private var detectionRequests: [VNDetectFaceRectanglesRequest]?
     private var trackingRequests: [VNTrackObjectRequest]?
     
+    // Tracks if the mouth is open in a way that suggests a surprised expression
     var isMouthOpenForSurprise = false
+    
+    // Indicates whether the eyes are currently blinking
     var isBlinking = false
+    
+    // Detects if the head is moving side-to-side, indicating a "shaking head" gesture
     var isShakingHead = false
+    
+    // Records the last time a facial feature was detected, to track timing and reduce redundant detections
     var lastDetectedTime: Date?
-
+    
+    
     
     lazy var sequenceRequestHandler = VNSequenceRequestHandler()
     
@@ -326,48 +334,48 @@ class ViewController: UIViewController {
     
     
     // MARK: - Landmark Detection Completion Handler
-        func landmarksCompletionHandler(request: VNRequest, error: Error?) {
-            if let error = error {
-                print("FaceLandmarks error: \(String(describing: error)).")
-                return
-            }
-            
-            guard let landmarksRequest = request as? VNDetectFaceLandmarksRequest,
-                  let results = landmarksRequest.results as? [VNFaceObservation] else { return }
-            
-            DispatchQueue.main.async {
-                self.drawFaceObservations(results)
-                for faceObservation in results {
-                    if let landmarks = faceObservation.landmarks {
-                        self.processLandmarks(landmarks)
-                    }
+    func landmarksCompletionHandler(request: VNRequest, error: Error?) {
+        if let error = error {
+            print("FaceLandmarks error: \(String(describing: error)).")
+            return
+        }
+        
+        guard let landmarksRequest = request as? VNDetectFaceLandmarksRequest,
+              let results = landmarksRequest.results as? [VNFaceObservation] else { return }
+        
+        DispatchQueue.main.async {
+            self.drawFaceObservations(results)
+            for faceObservation in results {
+                if let landmarks = faceObservation.landmarks {
+                    self.processLandmarks(landmarks)
                 }
             }
         }
+    }
+    
+    // MARK: - Process Detected Landmarks
+    func processLandmarks(_ landmarks: VNFaceLandmarks2D) {
+        guard let leftEye = landmarks.leftEye,
+              let rightEye = landmarks.rightEye,
+              let outerLips = landmarks.outerLips else { return }
         
-        // MARK: - Process Detected Landmarks
-        func processLandmarks(_ landmarks: VNFaceLandmarks2D) {
-            guard let leftEye = landmarks.leftEye,
-                  let rightEye = landmarks.rightEye,
-                  let outerLips = landmarks.outerLips else { return }
-            
-            if let lastTime = lastDetectedTime, Date().timeIntervalSince(lastTime) < 0.3 {
-                return
-            }
-            lastDetectedTime = Date()
-            
-            // Apply refined expression detection and update UI accordingly
-            updateUIIfChanged(condition: isMouthOpenForSurprise(outerLips), currentState: &isMouthOpenForSurprise, action: displayOpenMouthUI)
-            updateUIIfChanged(condition: isBlinking(leftEye, rightEye), currentState: &isBlinking, action: displayBlinkUI)
-            updateUIIfChanged(condition: isShakingHead(leftEye, rightEye), currentState: &isShakingHead, action: displayShakeHeadUI)
+        if let lastTime = lastDetectedTime, Date().timeIntervalSince(lastTime) < 0.3 {
+            return
         }
+        lastDetectedTime = Date()
         
+        // Apply refined expression detection and update UI accordingly
+        updateUIIfChanged(condition: isMouthOpenForSurprise(outerLips), currentState: &isMouthOpenForSurprise, action: displayOpenMouthUI)
+        updateUIIfChanged(condition: isBlinking(leftEye, rightEye), currentState: &isBlinking, action: displayBlinkUI)
+        updateUIIfChanged(condition: isShakingHead(leftEye, rightEye), currentState: &isShakingHead, action: displayShakeHeadUI)
+    }
+    
     // MARK: - Refined Expression Detection Conditions
-
+    
     func isMouthOpenForSurprise(_ outerLips: VNFaceLandmarkRegion2D) -> Bool {
         let points = outerLips.normalizedPoints
         guard points.count > 9 else { return false } // Ensure there are enough points
-
+        
         // Define left, right, and center points for upper and lower lips
         let leftCorner = points[0]
         let rightCorner = points[6]
@@ -377,61 +385,76 @@ class ViewController: UIViewController {
         // Calculate the mouth width and height
         let mouthWidth = abs(rightCorner.x - leftCorner.x)
         let mouthHeight = abs(upperMiddle.y - lowerMiddle.y)
-
+        
         // Heuristic for surprise: A significantly larger vertical distance relative to width
         return mouthHeight / mouthWidth > 0.5 && mouthHeight > 0.3
     }
-
-
-
-
+    
+    
+    // Checks if both eyes are in a closed state, suggesting a blink
     func isBlinking(_ leftEye: VNFaceLandmarkRegion2D, _ rightEye: VNFaceLandmarkRegion2D) -> Bool {
+        // Get the normalized points of each eye's landmarks
         let leftEyePoints = leftEye.normalizedPoints
         let rightEyePoints = rightEye.normalizedPoints
+        // Ensure there are enough points to measure eye height
         guard leftEyePoints.count > 4, rightEyePoints.count > 4 else { return false }
-
+        
+        // Calculate the vertical distance between specific eye points to estimate eye openness
         let leftEyeHeight = abs(leftEyePoints[4].y - leftEyePoints[1].y)
         let rightEyeHeight = abs(rightEyePoints[4].y - rightEyePoints[1].y)
-
-        return leftEyeHeight < 0.02 && rightEyeHeight < 0.02 // Slightly lowered for sensitivity
+        
+        // Return true if both eyes are closed enough to indicate a blink
+        return leftEyeHeight < 0.02 && rightEyeHeight < 0.02 // Sensitivity adjusted for more accurate blink detection
     }
-
+    
+    // Detects if the head is moving side-to-side, indicating a "shaking head" gesture
     func isShakingHead(_ leftEye: VNFaceLandmarkRegion2D, _ rightEye: VNFaceLandmarkRegion2D) -> Bool {
+        // Get the normalized points of each eye's landmarks
         let leftEyePoints = leftEye.normalizedPoints
         let rightEyePoints = rightEye.normalizedPoints
+        // Ensure there are enough points to measure the distance between the eyes
         guard leftEyePoints.count > 0, rightEyePoints.count > 0 else { return false }
-
+        
+        // Calculate the horizontal distance between the two eyes
         let horizontalEyeDistance = abs(leftEyePoints[0].x - rightEyePoints[0].x)
-
-        // Lowered the threshold slightly to better capture head shake
-        return horizontalEyeDistance > 0.35
+        
+        // Return true if distance exceeds threshold, suggesting head movement
+        return horizontalEyeDistance > 0.35 // Threshold lowered to improve head shake detection sensitivity
     }
-
-        
-        // MARK: - UI Update Methods
-        private func updateUIIfChanged(condition: Bool, currentState: inout Bool, action: () -> Void) {
-            if condition != currentState {
-                currentState = condition
-                if condition { action() }
-            }
+    
+    // MARK: - UI Update Methods
+    
+    // Updates the UI when a condition changes and triggers the associated action
+    private func updateUIIfChanged(condition: Bool, currentState: inout Bool, action: () -> Void) {
+        // Check if the new condition differs from the current state
+        if condition != currentState {
+            currentState = condition
+            // Execute the UI action if the condition is now true
+            if condition { action() }
         }
-        
-        // MARK: - UI Feedback Display Methods
-        func displayOpenMouthUI() {
+    }
+    
+    // MARK: - UI Feedback Display Methods
+    
+    // Displays a UI overlay and feedback for open mouth detection
+    func displayOpenMouthUI() {
         updateOverlayColor(to: .red)
         showUIFeedback(labelText: "😮 Detected!", color: .red, positionY: 100)
     }
-
-        func displayBlinkUI() {
+    
+    // Displays a UI overlay and feedback for blink detection
+    func displayBlinkUI() {
         updateOverlayColor(to: .blue)
         showUIFeedback(labelText: "😉 Blink Detected!", color: .blue, positionY: 200)
     }
-
-        func displayShakeHeadUI() {
+    
+    // Displays a UI overlay and feedback for head shake detection
+    func displayShakeHeadUI() {
         updateOverlayColor(to: .purple)
         showUIFeedback(labelText: "🙅‍♂️ Head Shake Detected!", color: .purple, positionY: 300)
-        }
-
+    }
+    
+    // Updates the color of the overlay to visually represent detected gestures
     private func updateOverlayColor(to color: UIColor) {
         detectionOverlayLayer?.sublayers?.forEach { layer in
             if let shapeLayer = layer as? CAShapeLayer {
@@ -439,29 +462,30 @@ class ViewController: UIViewController {
             }
         }
     }
-
+    
+    // Displays animated feedback text on the UI with fade-in and fade-out animations
+    private func showUIFeedback(labelText: String, color: UIColor, positionY: CGFloat) {
+        // Create a label with the specified text, color, and position
+        let label = UILabel()
+        label.text = labelText
+        label.font = UIFont.systemFont(ofSize: 24)
+        label.textColor = color
+        label.alpha = 0 // Start label as invisible
+        label.frame = CGRect(x: 50, y: positionY, width: 250, height: 50)
+        self.view.addSubview(label)
         
-        private func showUIFeedback(labelText: String, color: UIColor, positionY: CGFloat) {
-            let label = UILabel()
-            label.text = labelText
-            label.font = UIFont.systemFont(ofSize: 24)
-            label.textColor = color
-            label.alpha = 0
-            label.frame = CGRect(x: 50, y: positionY, width: 250, height: 50)
-            self.view.addSubview(label)
-            
-            // Animate the label appearance and fade out
-            UIView.animate(withDuration: 0.5, animations: {
-                label.alpha = 1
+        // Animate the label's appearance and disappearance
+        UIView.animate(withDuration: 0.5, animations: {
+            label.alpha = 1 // Fade in
+        }) { _ in
+            UIView.animate(withDuration: 1.0, delay: 1.0, options: [], animations: {
+                label.alpha = 0 // Fade out
             }) { _ in
-                UIView.animate(withDuration: 1.0, delay: 1.0, options: [], animations: {
-                    label.alpha = 0
-                }) { _ in
-                    label.removeFromSuperview()
-                }
+                label.removeFromSuperview() // Remove the label after fading out
             }
         }
     }
+}
     
 
 
